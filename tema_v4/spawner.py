@@ -3,68 +3,86 @@ import random
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
 def main():
-    print("Connecting Spawner to CoppeliaSim...")
+    print("Connecting Motion-Aware Spawner...")
     client = RemoteAPIClient()
     sim = client.require('sim')
 
-    # --- 1. GET HANDLES ---
     try:
-        # Added the cuboid templates alongside the cylinders
-        template_red_cyl = sim.getObject('/Red_cylinder')
-        template_blue_cyl = sim.getObject('/Blue_cylinder')
-        template_red_cube = sim.getObject('/Red_cuboid')
-        template_blue_cube = sim.getObject('/Blue_cuboid')
+        # Handles for templates
+        templates = [
+            (sim.getObject('/Red_cylinder'), "RED CYLINDER"),
+            (sim.getObject('/Blue_cylinder'), "BLUE CYLINDER"),
+            (sim.getObject('/Red_cuboid'), "RED CUBOID"),
+            (sim.getObject('/Blue_cuboid'), "BLUE CUBOID")
+        ]
         spawn_point = sim.getObject('/Spawn_point')
-        print("Templates and Spawn Point found!")
+        
+        # We monitor this conveyor to see if we are moving
+        main_conveyor = sim.getObject('/conveyor_1')
+
+        # Secure originals underground
+        for handle, _ in templates:
+            sim.setObjectPosition(handle, -1, [0, 0, -5])
+            sim.setObjectInt32Param(handle, sim.shapeintparam_static, 1)
+            
+        print("Spawner Synced with Conveyor Motion.")
     except Exception as e:
-        print("Error finding objects. Check names in the hierarchy:", e)
-        return
+        print("Error during setup:", e); return
 
-    # Wait a moment to ensure the simulation is fully running (started by main.py)
-    time.sleep(2)
-    
-    spawn_interval = 10.0  # Seconds between each object dropping
+    # --- SPAWN CONFIGURATION ---
+    target_spacing = 0.5  # Meters between objects
+    accumulated_dist = 0.9 # Start almost ready to spawn the first one
+    last_sim_time = sim.getSimulationTime()
 
-    print(f"Spawner active! Dropping an object every {spawn_interval} seconds...")
-
-    # Group the handles with a descriptive name for easy random selection and logging
-    templates = [
-        (template_red_cyl, "RED CYLINDER"),
-        (template_blue_cyl, "BLUE CYLINDER"),
-        (template_red_cube, "RED CUBOID"),
-        (template_blue_cube, "BLUE CUBOID")
-    ]
-
-    # --- 2. MAIN SPAWN LOOP ---
     try:
         while True:
-            # Check if simulation is stopped
-            if sim.getSimulationState() == sim.simulation_stopped:
-                print("Simulation stopped. Exiting spawner.")
-                break
+            if sim.getSimulationState() == sim.simulation_stopped: break
 
-            # Pick a random template tuple (unpacks the handle and the name)
-            choice_handle, obj_name = random.choice(templates)
+            # 1. Calculate Delta Time (Sim Time)
+            now = sim.getSimulationTime()
+            dt = now - last_sim_time
+            last_sim_time = now
 
-            # 1. Copy the template (returns a list of new handles, we want the first one)
-            new_object = sim.copyPasteObjects([choice_handle], 0)[0]
+            # 2. Get Current Belt Velocity
+            # We check the 'conveyorSpeed' signal usually set by actuators.py
+            # Fallback: check the joint velocity directly if the signal isn't found
+            speed = sim.getFloatSignal('conveyorSpeed')
+            if speed is None:
+                # Default to 0.1 if main.py is running, 0 if stopped
+                # This is a fallback if your actuators.py doesn't use signals
+                speed = 0.1 if dt > 0 else 0 
+                # Note: To be 100% accurate, ensure actuators.py uses:
+                # sim.setFloatSignal('conveyorSpeed', final_speed)
 
-            # 2. Get the XYZ coordinates of the Spawn_Point (-1 means absolute world coordinates)
-            spawn_pos = sim.getObjectPosition(spawn_point, -1)
+            # 3. Integrate Distance: Distance = Speed * Time
+            # We only add distance if the belt is actually "on"
+            if dt > 0:
+                accumulated_dist += abs(speed) * dt
 
-            # 3. Teleport the newly copied object to the Spawn_Point
-            sim.setObjectPosition(new_object, -1, spawn_pos)
+            # 4. Spawn logic
+            if accumulated_dist >= target_spacing:
+                choice_handle, obj_name = random.choice(templates)
+                
+                # Clone and Place
+                new_obj = sim.copyPasteObjects([choice_handle], 0)[0]
+                sim.setObjectQuaternion(new_obj, -1, [0, 0, 0, 1])
+                spawn_pos = sim.getObjectPosition(spawn_point, -1)
+                sim.setObjectPosition(new_obj, -1, spawn_pos)
+                
+                # Enable physics
+                sim.setObjectInt32Param(new_obj, sim.shapeintparam_static, 0)
+                sim.resetDynamicObject(new_obj)
 
-            # Activates the object so it falls on the conveyor
-            sim.resetDynamicObject(new_object)
-
-            print(f"Spawned a {obj_name}!")
-
-            # Wait before spawning the next one
-            time.sleep(spawn_interval)
+                print(f"Distance Reached ({accumulated_dist:.2f}m). Spawned: {obj_name}")
+                
+                # Reset odometer
+                accumulated_dist = 0
+            
+            # Small sleep to prevent CPU hogging, but keep it responsive
+            time.sleep(0.01)
             
     except KeyboardInterrupt:
-        print("\nSpawner manually stopped.")
+        print("\nSpawner offline.")
 
 if __name__ == "__main__":
     main()
