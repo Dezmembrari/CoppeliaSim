@@ -92,7 +92,7 @@ class Station:
                     self.push_state = "PASSING"
         
         elif self.push_state == "PASSING":
-            if not broken: # Object fully cleared
+            if not broken: 
                 passed_obj = self.in_queue.pop(0)
                 if self.next_queue is not None:
                     self.next_queue.append(passed_obj)
@@ -101,44 +101,24 @@ class Station:
                 self.laser_cooldown = now + 0.3
 
         elif self.push_state == "TARGET_CROSSING":
-            if not broken: # Object centered
-                if self.belt_state == "RUNNING":
+            if not broken: 
+                # FIX 1: The pusher can fire as long as the robot isn't actively 
+                # grabbing (WAITING_FOR_LIFT) AND the short belt isn't physically jammed.
+                if not object_at_sensor and self.belt_state != "WAITING_FOR_LIFT":
                     obj = self.in_queue.pop(0)
                     self.robot_queue.append(obj)
                     fire_pusher(self.sim, self.pusher)
                     self.push_state = "PUSHING"
                     self.push_timer = now + 1.2
+                    # Kickstart the short belt so it receives the item smoothly
+                    set_conveyor_speed(self.sim, self.short_belt, self.short_speed)
                 else:
-                    requires_stop = True # Target centered, but robot busy
+                    requires_stop = True # Target centered, but short belt is blocked. Halt main belt!
 
         elif self.push_state == "PUSHING":
             if now > self.push_timer:
                 retract_pusher(self.sim, self.pusher)
                 self.push_state = "IDLE"
                 self.laser_cooldown = now + 0.3
-
-
-        # --- 2. ROBOT & SHORT BELT LOGIC ---
-        r_res = self.sim.readProximitySensor(self.end_sensor)
-        
-        if self.belt_state == "RUNNING":
-            set_conveyor_speed(self.sim, self.short_belt, self.short_speed)
-            if r_res[0] > 0:
-                self.belt_state = "ROBOT_WORKING"
-                self.belt_timer = now + 4.0 
-                set_conveyor_speed(self.sim, self.short_belt, 0.0) 
-                shape = self.robot_queue[0] if self.robot_queue else "Unknown"
-                print(f"[{self.name} ROBOT] 🦾 Sorting: {shape.upper()}")
-        
-        elif self.belt_state == "ROBOT_WORKING":
-            if now > self.belt_timer:
-                if self.robot_queue: self.robot_queue.pop(0)
-                self.belt_state = "CLEARING"
-                self.belt_timer = now + 2.0
-        
-        elif self.belt_state == "CLEARING":
-            set_conveyor_speed(self.sim, self.short_belt, self.short_speed)
-            if now > self.belt_timer: 
-                self.belt_state = "RUNNING"
 
         return requires_stop
