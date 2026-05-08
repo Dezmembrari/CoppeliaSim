@@ -19,8 +19,8 @@ def main():
 
         # --- INITIALIZE MODULAR STATIONS ---
         # Note: We initialize ST2 first so we can pass its input queue to ST1!
-        st2 = Station(sim, "Station 2", '/Joint_pusher_2', '/proximitySensor_2', '/conveyor_5', '/proximitySensor_4', ["blue_cube", "blue_cylinder"])
-        st1 = Station(sim, "Station 1", '/Joint_pusher', '/proximitySensor_1', '/conveyor_4', '/proximitySensor_3', ["red_cube", "red_cylinder"], next_queue=st2.in_queue)
+        st2 = Station(sim, "Station 2", '/Joint_pusher_2', '/proximitySensor_2', '/conveyor_5', '/proximitySensor_4', '/UR5_2', ["blue_cube", "blue_cylinder"])
+        st1 = Station(sim, "Station 1", '/Joint_pusher', '/proximitySensor_1', '/conveyor_4', '/proximitySensor_3', '/UR5_1', ["red_cube", "red_cylinder"], next_queue=st2.in_queue)
         
         stations = [st1, st2]
 
