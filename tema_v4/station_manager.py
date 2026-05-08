@@ -1,21 +1,22 @@
 from actuators import set_conveyor_speed
 from robot_controller import UR5Robot 
-from pusher_controller import PusherController # <-- NEW IMPORT
-import config
+from pusher_controller import PusherController 
+import config  # <--- ENSURE THIS LINE IS HERE
 
 class Station:
-    def __init__(self, sim, name, pusher_path, laser_path, short_belt_path, end_sensor_path, robot_base_path, targets, next_queue=None):
+    def __init__(self, sim, state, name, pusher, laser, short_belt, end_sensor, robot_base, targets, next_queue=None):
         self.sim = sim
+        self.state = state # Store the shared GUI state
         self.name = name
         
         # Hardware Setup
-        self.laser = self.sim.getObject(laser_path)
-        self.short_belt = self.sim.getObject(short_belt_path)
-        self.end_sensor = self.sim.getObject(end_sensor_path)
+        self.laser = self.sim.getObject(laser)
+        self.short_belt = self.sim.getObject(short_belt)
+        self.end_sensor = self.sim.getObject(end_sensor)
         
         # Specialized Controllers
-        self.robot = UR5Robot(sim, robot_base_path, name=f"{name} Arm")
-        self.pusher_ctrl = PusherController(sim, pusher_path) # <-- REPLACED HANDLE
+        self.robot = UR5Robot(sim, robot_base, state, name=f"{name} Arm")
+        self.pusher_ctrl = PusherController(sim, pusher, state)
         
         # Logic Setup
         self.targets = targets
@@ -23,11 +24,13 @@ class Station:
         self.next_queue = next_queue 
         self.robot_queue = []       
         
-        # Logic States (Object Tracking only)
+        # Logic States
         self.push_state = "IDLE"
         self.belt_state = "RUNNING"
-        self.short_speed = config.SHORT_BELT_SPEED
-        self.current_belt_speed = -1.0 
+        
+        # FIX: Pull from state if you want live tuning, or config if you want it static
+        self.short_speed = config.SHORT_BELT_SPEED 
+        self.current_belt_speed = -1.0
 
     def _apply_short_belt_speed(self, target_speed):
         if self.current_belt_speed != target_speed:
@@ -35,6 +38,7 @@ class Station:
             self.current_belt_speed = target_speed
 
     def update(self, now):
+        self.short_speed = self.state.main_speed # Matches short belt to main belt speed
         requires_stop = False
         
         # 1. Advance Sub-Controllers
