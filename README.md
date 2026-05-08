@@ -61,7 +61,7 @@ uv venv
 
 ### 3. Install Requirements
 ```bash
-uv pip install PyQt6 opencv-python numpy joblib scikit-learn coppeliasim-zmqremoteapi-client
+uv pip install requirements.txt # or PyQt6 opencv-python numpy joblib scikit-learn coppeliasim-zmqremoteapi-client
 ```
 
 ---
