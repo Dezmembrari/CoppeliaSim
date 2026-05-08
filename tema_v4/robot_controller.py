@@ -1,210 +1,155 @@
 import math
+from kinematics import KinematicsEngine
+from palletizer import Palletizer
 
 class UR5Robot:
     def __init__(self, sim, base_path, name="Robot"):
         self.sim = sim
         self.name = name
         
-        # 1. Hardware Setup
+        self.kin = KinematicsEngine(d1=0.089, a2=0.425, a3=0.392, elbow_config=-1)
+        self.plt = Palletizer(spacing_cm=10.0, grid_size=3)
+        
+        self.pickup_anchor = self._deg2rad([0, 0, -67, -23, 90, 0])
+        
+        # --- HEIGHT CONTROLS ---
+        # Change '0.15' to adjust how deep the robot plunges.
+        # Ensure base_deg matches exactly where your baskets are placed.
+        self.basket_anchors = {
+            "cube":     {"base_deg": 120,  "reach": -0.55, "height": 0.30},
+            "cylinder": {"base_deg": -160, "reach": -0.55, "height": 0.30} 
+        }
+        
+        self.orient_const = sum(self.pickup_anchor[1:4])
+        
+        self.pick_reach, self.pick_height = self.kin.forward(self.pickup_anchor[1], self.pickup_anchor[2])
+        res = self.kin.inverse(self.pick_reach, self.pick_height + 0.10, self.orient_const)
+        self.pos_hover = [0, res[0], res[1], res[2], math.radians(90), 0]
+        self.pos_home = self.pos_hover
+
         self.joints = [self.sim.getObject(f"{base_path}/joint", {"index": i}) for i in range(6)]
         self.tip = self.sim.getObject(f"{base_path}/suctionPad")
-        
-        # Make the suction pad purely visual (Ghost it so it never pushes objects)
         self.sim.setObjectInt32Param(self.tip, self.sim.shapeintparam_respondable, 0)
         
-        # 2. Extracted Joint Angles (Converted to Radians)
-        self.pos_pickup      = self._deg2rad([0, 0, -67, -23, 90, 0])
-        self.pos_hover       = self._calculate_vertical_lift(0.10) 
-        
-        # Home is now the safe Hover point to prevent sweeping the table
-        self.pos_home        = self.pos_hover 
-        
-        self.pos_basket_cube = self._deg2rad([120, -20, -67, -3, 90, 0])
-        self.pos_basket_cyl  = self._deg2rad([-160, -20, -67, -3, 90, 0])
-
-        # 3. State Machine Variables
-        self.state = "HOME"
-        self.timer = 0
-        self.current_target_shape = None
+        self.state, self.timer = "HOME", 0
+        self.drop_hover_pose = None
+        self.drop_low_pose = None
         self.held_object_handle = None 
-        
-        # 4. Trajectory Generation Variables
-        self.is_moving = False
-        self.move_start_time = 0
-        self.move_duration = 1.0
-        self.start_angles = [0]*6
-        self.target_angles = [0]*6
-        
-        # 5. Snap to safe home instantly on startup (No trajectory needed for frame 0)
+        self.is_moving, self.move_start_time, self.move_duration = False, 0, 1.0
+        self.start_angles, self.target_angles = [0]*6, [0]*6
+
         for joint, angle in zip(self.joints, self.pos_home):
             self.sim.setJointTargetPosition(joint, angle)
 
-    def _deg2rad(self, degrees_list):
-        return [math.radians(d) for d in degrees_list]
+    def _deg2rad(self, deg_list): return [math.radians(d) for d in deg_list]
 
-    def _calculate_vertical_lift(self, lift_meters):
-        """
-        Robust Planar Inverse Kinematics for UR5.
-        Calculates J2, J3, J4 to achieve a straight vertical lift while:
-        1. Persisting the elbow configuration (up/down) from the pickup pose.
-        2. Guarding against out-of-reach targets.
-        3. Maintaining end-effector orientation."""
-        L1 = 0.425   # Upper arm
-        L2 = 0.3922  # Forearm
+    def _get_drop_poses(self, shape_name):
+        key = "cube" if "cube" in shape_name.lower() else "cylinder"
+        anchor = self.basket_anchors[key]
         
-        # 1. Current state and configuration
-        j2_init = self.pos_pickup[1]
-        j3_init = self.pos_pickup[2]
+        dr, dl = self.plt.get_grid_offsets(key)
         
-        # Identify elbow configuration: -1 for elbow-up, 1 for elbow-down
-        elbow_config = -1 if j3_init < 0 else 1
+        target_reach = anchor["reach"] + dr
+        base_nudge_rad = dl / abs(anchor["reach"]) 
+        target_base_rad = math.radians(anchor["base_deg"]) + base_nudge_rad
         
-        # 2. Forward Kinematics: Map current joint state to Cartesian (X, Z)
-        # Using the standard vertical-zero frame where J2=0 is UP.
-        current_X = L1 * math.sin(j2_init) + L2 * math.sin(j2_init + j3_init)
-        current_Z = L1 * math.cos(j2_init) + L2 * math.cos(j2_init + j3_init)
+        # --- CLEARANCE CONTROL ---
+        # Change the '+ 0.25' to adjust how high it hovers over the basket before plunging
+        res_high = self.kin.inverse(target_reach, anchor["height"] + 0.25, self.orient_const)
+        res_low = self.kin.inverse(target_reach, anchor["height"], self.orient_const)
         
-        # 3. Define Target (Lift Z, keep X locked)
-        target_X = current_X
-        target_Z = current_Z + lift_meters
+        if res_high is None or res_low is None: 
+            print(f"[{self.name}] ERROR: Grid slot out of reach!")
+            return self.pos_home, self.pos_home
+            
+        pose_high = [target_base_rad, res_high[0], res_high[1], res_high[2], math.radians(90), 0]
+        pose_low  = [target_base_rad, res_low[0],  res_low[1],  res_low[2],  math.radians(90), 0]
         
-        # 4. Inverse Kinematics
-        D_sq = target_X**2 + target_Z**2
-        D = math.sqrt(D_sq)
-        
-        # Reachability Guard
-        if D > (L1 + L2) or D < abs(L1 - L2):
-            print(f"[ROBOT] Target [{target_X:.3f}, {target_Z:.3f}] is out of reach!")
-            return self.pos_pickup # Fallback to original pose to prevent crash
+        return pose_high, pose_low
 
-        # Solve for J3
-        # Law of Cosines: D^2 = L1^2 + L2^2 - 2*L1*L2*cos(180 - J3) => cos(J3)
-        cos_j3 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
-        cos_j3 = max(-1.0, min(1.0, cos_j3)) # Floating point safety
-        
-        # Apply elbow configuration persistence
-        new_j3 = elbow_config * math.acos(cos_j3)
-        
-        # Solve for J2
-        # Alpha: Angle to target | Beta: Internal triangle angle
-        alpha = math.atan2(target_X, target_Z)
-        beta = math.atan2(L2 * math.sin(new_j3), L1 + L2 * math.cos(new_j3))
-        new_j2 = alpha - beta
-        
-        # 5. Orientation Constraint (J4)
-        # Sum of angles relative to vertical must stay constant for level tool
-        orig_sum = j2_init + j3_init + self.pos_pickup[3]
-        new_j4 = orig_sum - (new_j2 + new_j3)
-        
-        # Construct final pose
-        hover = list(self.pos_pickup)
-        hover[1], hover[2], hover[3] = new_j2, new_j3, new_j4
-        
-        return hover
-
-    # =========================================================
-    # TRAJECTORY GENERATOR (Smooth, Anti-Flail Movement)
-    # =========================================================
     def _start_move(self, target_angles, duration_sec, now):
-        """Prepares a smooth transition from current angles to target angles"""
         self.start_angles = [self.sim.getJointPosition(j) for j in self.joints]
-        self.target_angles = target_angles
-        self.move_start_time = now
-        self.move_duration = duration_sec
-        self.is_moving = True
+        self.target_angles = list(target_angles)
+        
+        for i in range(6):
+            # RESTORED: All joints now use the safest, shortest physical path
+            diff = (self.target_angles[i] - self.start_angles[i] + math.pi) % (2 * math.pi) - math.pi
+            self.target_angles[i] = self.start_angles[i] + diff
+            
+        self.move_start_time, self.move_duration, self.is_moving = now, duration_sec, True
 
     def _update_movement(self, now):
-        """Called every frame. Returns True if the move is finished."""
         if not self.is_moving: return True
-        
-        t = (now - self.move_start_time) / self.move_duration
-        if t >= 1.0:
-            t = 1.0
-            self.is_moving = False
-            
-        # Cosine Easing (Slow start, fast middle, slow stop)
+        t = max(0, min(1.0, (now - self.move_start_time) / self.move_duration))
+        if t >= 1.0: self.is_moving = False
         ease_t = 0.5 * (1 - math.cos(math.pi * t))
-        
-        # Apply the micro-step to the motors
         for i in range(6):
-            current_angle = self.start_angles[i] + (self.target_angles[i] - self.start_angles[i]) * ease_t
-            self.sim.setJointTargetPosition(self.joints[i], current_angle)
-            
+            angle = self.start_angles[i] + (self.target_angles[i] - self.start_angles[i]) * ease_t
+            self.sim.setJointTargetPosition(self.joints[i], angle)
         return not self.is_moving
 
-    # =========================================================
-    # THE GHOST GRIP
-    # =========================================================
     def _set_gripper(self, active):
-        if active and self.held_object_handle:
-            self.sim.setObjectInt32Param(self.held_object_handle, self.sim.shapeintparam_respondable, 0)
-            self.sim.setObjectInt32Param(self.held_object_handle, self.sim.shapeintparam_static, 1)
-            self.sim.setObjectParent(self.held_object_handle, self.tip, True)
-
-        elif not active and self.held_object_handle:
-            self.sim.setObjectParent(self.held_object_handle, -1, True)
-            self.sim.setObjectInt32Param(self.held_object_handle, self.sim.shapeintparam_static, 0)
-            self.sim.setObjectInt32Param(self.held_object_handle, self.sim.shapeintparam_respondable, 1)
+        if not self.held_object_handle: return
+        self.sim.setObjectInt32Param(self.held_object_handle, self.sim.shapeintparam_respondable, 0 if active else 1)
+        self.sim.setObjectInt32Param(self.held_object_handle, self.sim.shapeintparam_static, 1 if active else 0)
+        self.sim.setObjectParent(self.held_object_handle, self.tip if active else -1, True)
+        if not active:
             self.sim.resetDynamicObject(self.held_object_handle)
             self.held_object_handle = None
 
-    # =========================================================
-    # SEQUENCER STATE MACHINE
-    # =========================================================
     def start_sort(self, shape_name, object_handle, now):
-        self.current_target_shape = shape_name
         self.held_object_handle = object_handle 
-        
-        # Because we rest at the safe Hover point, we go straight down to pickup
+        self.drop_hover_pose, self.drop_low_pose = self._get_drop_poses(shape_name)
         self.state = "TO_PICKUP"
-        self._start_move(self.pos_pickup, 0.6, now)
+        self._start_move(self.pickup_anchor, 0.8, now)
 
     def update(self, now):
-        # Always run the movement interpolator first
-        move_complete = self._update_movement(now)
+        if not self._update_movement(now): return self.state
         
-        # If the arm is currently travelling, do nothing else
-        if not move_complete: return self.state
-
-        # State Machine Progresses ONLY when movement is finished
         if self.state == "TO_PICKUP":
-            # Arrived at cube. Wait 0.4s before grabbing.
-            self.state = "PAUSE_GRAB"
-            self.timer = now + 0.4
+            self.state, self.timer = "PAUSE_GRAB", now + 0.4
             
         elif self.state == "PAUSE_GRAB":
             if now > self.timer:
-                self._set_gripper(True) # ATTACH!
+                self._set_gripper(True)
                 self.state = "LIFTING"
-                # Pull straight back up to hover over 0.6 seconds
-                self._start_move(self.pos_hover, 0.6, now)
+                self._start_move(self.pos_hover, 0.8, now)
                 
         elif self.state == "LIFTING":
             self.state = "SWINGING"
-            # Swing to basket over 1.2 seconds
-            if "cube" in self.current_target_shape.lower():
-                self._start_move(self.pos_basket_cube, 1.2, now)
-            else:
-                self._start_move(self.pos_basket_cyl, 1.2, now)
-                
+            # 1. Swing horizontally above the basket walls
+            self._start_move(self.drop_hover_pose, 1.2, now)
+            
         elif self.state == "SWINGING":
-            # Arrived at basket. Wait 0.8s to let inertia settle.
-            self.state = "SETTLING"
-            self.timer = now + 0.8
+            # 2. THE FIX: Wait 0.5 seconds at the top to kill momentum
+            self.state, self.timer = "PAUSE_HOVER", now + 0.5
+            
+        elif self.state == "PAUSE_HOVER":
+            if now > self.timer:
+                self.state = "PLUNGING"
+                # 3. Move straight vertically down into the basket
+                self._start_move(self.drop_low_pose, 0.8, now)
+            
+        elif self.state == "PLUNGING":
+            # 4. Wait/Settle after reaching the bottom
+            self.state, self.timer = "SETTLING", now + 1.0
             
         elif self.state == "SETTLING":
             if now > self.timer:
-                self._set_gripper(False) # DROP!
-                self.state = "PAUSE_DROP"
-                self.timer = now + 0.4 # Let it fall away before moving
+                self._set_gripper(False) # 5. DROP
+                self.state, self.timer = "PAUSE_DROP", now + 0.5
                 
         elif self.state == "PAUSE_DROP":
             if now > self.timer:
-                self.state = "RETURNING"
-                # Go back home smoothly over 1.5 seconds
-                self._start_move(self.pos_home, 1.5, now)
+                self.state = "LIFTING_CLEAR"
+                # 6. Pull straight back up the exact same vertical line
+                self._start_move(self.drop_hover_pose, 0.8, now)
+                
+        elif self.state == "LIFTING_CLEAR":
+            self.state = "RETURNING"
+            self._start_move(self.pos_home, 1.0, now)
                 
         elif self.state == "RETURNING":
             self.state = "HOME"
-
+            
         return self.state
