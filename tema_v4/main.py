@@ -9,6 +9,9 @@ def main():
     client = RemoteAPIClient()
     sim = client.require('sim')
 
+    # --- THE MAGIC BULLET: Enable Synchronous Mode ---
+    client.setStepping(True) 
+
     try:
         main_belts = [sim.getObject('/conveyor_1'), sim.getObject('/conveyor_2'), sim.getObject('/conveyor_3')]
         master_cam = sim.getObject('/visionSensor')
@@ -30,7 +33,7 @@ def main():
     MAIN_SPEED = 0.1
     shutter_last = False
 
-    print("\n[SYSTEM] Factory Online. Modular stations active.")
+    print("\n[SYSTEM] Factory Online. Synchronous mode active.")
 
     try:
         while True:
@@ -66,10 +69,25 @@ def main():
             set_conveyor_speed(sim, main_belts, final_speed)
             sim.setFloatSignal('conveyorSpeed', final_speed)
 
-            time.sleep(0.01)
+            # --- THE MAGIC BULLET 2: Step the simulation ---
+            client.step() 
+            
+            # (time.sleep(0.01) was removed. In synchronous mode, client.step() 
+            # tells the physics engine to advance exactly one frame, acting as our perfect loop timer.)
 
     except KeyboardInterrupt: 
-        sim.stopSimulation()
+        print("\n[SYSTEM] Emergency Stop triggered. Releasing physics engine...")
+        try:
+            # Our main ZMQ socket is jammed because we interrupted it mid-receive.
+            # We open a fresh "rescue" connection to safely shut down the server.
+            rescue_client = RemoteAPIClient()
+            rescue_sim = rescue_client.require('sim')
+            
+            rescue_client.setStepping(False) 
+            rescue_sim.stopSimulation()
+            print("[SYSTEM] Safely disconnected.")
+        except Exception as e:
+            print(f"[SYSTEM] Rescue failed: {e}. Please press the STOP button in CoppeliaSim.")
 
 if __name__ == "__main__": 
     main()
