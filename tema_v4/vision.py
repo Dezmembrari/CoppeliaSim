@@ -1,22 +1,17 @@
 import cv2
 import numpy as np
-import joblib
-
-def load_ai_model(model_path="ML/random_forest_model.joblib"):
-    try:
-        model = joblib.load(model_path)
-        return model
-    except Exception as e:
-        print(f"❌ Failed to load AI model: {e}")
-        return None
 
 def get_fingerprint(img):
-    """Must be perfectly identical to train_model.py!"""
+    """
+    Extracts geometric and color features from an image.
+    Must be perfectly identical to the logic used during model training!
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
     
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return np.zeros(4)
+    if not contours: 
+        return np.zeros(4)
         
     c = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(c)
@@ -38,7 +33,17 @@ def get_fingerprint(img):
     return np.array([mean_color[0], mean_color[1], circularity, extent])
 
 def get_camera_state(sim, sensor_handle):
-    """Simply finds the object and returns the image and its exact Y-center."""
+    """
+    Captures an image from CoppeliaSim and finds the object's vertical center.
+    Returns: (OpenCV Image, center_y_integer)
+    """
+    
+    """
+    Captures an image from CoppeliaSim. 
+    NOTE: Performance is optimized for a 128x128 sensor resolution.
+    Higher resolutions will significantly increase ZMQ network lag.
+    """
+    
     img, res = sim.getVisionSensorImg(sensor_handle)
     if not img or len(img) == 0:
         return None, None
@@ -47,28 +52,15 @@ def get_camera_state(sim, sensor_handle):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     img = cv2.flip(img, 0)
 
-    # Use a threshold of 20 to ignore the dark conveyor belt and only see the bright objects
+    # Threshold to ignore the dark belt background
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)
     
     coords = cv2.findNonZero(thresh)
-    
     if coords is None:
         return img, None
         
     x, y, w, h = cv2.boundingRect(coords)
-    
-    # Calculate the exact center of the object's mass
     center_y = int(y + (h / 2))
 
-    # Return the Image FIRST, and the center_y integer SECOND
     return img, center_y
-
-def ask_ai(img, model):
-    features = get_fingerprint(img)
-    prediction = model.predict([features])[0]
-    
-    probabilities = model.predict_proba([features])[0]
-    confidence = max(probabilities) * 100
-    
-    return prediction, confidence
