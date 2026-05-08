@@ -22,7 +22,12 @@ running the object algo --> uv run spawner.py
 1. **CoppeliaSim:** Version 4.3+ (ZMQ Remote API required).
 2. **Python Dependencies:**
    ```bash
-   pip install coppeliasim-zmqremoteapi-client
+  pip install uv #if not installed already
 
+  For starting up the env:
 
- #  --> Pentru Roboti posibil sa ai nevoie de un sistem de signal polling/digital handshake, inlocuiieste timpii de mock robot din station_manager.py si vezi robot controller-ul (script-ul) din Coppelia
+   ```bash
+   uv venv
+   uv pip install requirements.txt
+   uv run main.py
+   uv run spawner.py
