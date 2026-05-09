@@ -197,7 +197,7 @@ class FactoryControlPanel(QMainWindow):
         layout.addWidget(self.lbl_latency)
 
         layout.addWidget(QLabel("\nGlobal Main Belt Speed Control:"))
-        self.add_generic_slider(layout, "Main Speed", 0, 20, 
+        self.add_generic_slider(layout, "Main Speed", 0, 10, 
                                int(self.state.main_speed * 100), 
                                lambda v: setattr(self.state, 'main_speed', v/100.0))
         
