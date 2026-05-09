@@ -312,7 +312,7 @@ class FactoryControlPanel(QMainWindow):
         layout = QVBoxLayout(tab)
 
         header = QLabel("Hybrid Computer Vision Architecture")
-        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #bb86fc;")
+        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #9c27b0;") # Adjusted color for lightmode contrast
         layout.addWidget(header)
 
         # Summary Section
@@ -344,7 +344,8 @@ class FactoryControlPanel(QMainWindow):
         names = ["Mean Hue", "Mean Saturation", "Circularity (0-1)", "Extent (Fill Ratio)"]
         for name in names:
             lbl = QLabel(f"{name}: 0.0000")
-            lbl.setStyleSheet("font-family: monospace; background-color: #1e1e1e; padding: 5px;")
+            # Added 'color: white;' to explicitly fix lightmode black-text rendering
+            lbl.setStyleSheet("font-family: monospace; background-color: #1e1e1e; color: white; padding: 5px;")
             self.ml_labels.append(lbl)
             fingerprint_layout.addWidget(lbl)
         fingerprint_layout.addStretch()
@@ -354,7 +355,8 @@ class FactoryControlPanel(QMainWindow):
 
         # Model Metadata
         meta_frame = QFrame()
-        meta_frame.setStyleSheet("background-color: #333; border-radius: 5px; padding: 10px;")
+        # Added 'color: white;' to explicitly fix lightmode black-text rendering
+        meta_frame.setStyleSheet("background-color: #333; color: white; border-radius: 5px; padding: 10px;")
         meta_layout = QVBoxLayout(meta_frame)
         meta_layout.addWidget(QLabel("Model: Random Forest (Scikit-Learn) | Estimators: 100 Trees"))
         layout.addWidget(meta_frame)
