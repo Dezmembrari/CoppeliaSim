@@ -26,6 +26,9 @@ class UR5Robot:
         self.joints = [self.sim.getObject(f"{base_path}/joint", {"index": i}) for i in range(6)]
         self.tip = self.sim.getObject(f"{base_path}/suctionPad")
         self.sim.setObjectInt32Param(self.tip, self.sim.shapeintparam_respondable, 0)
+
+        # Needed to resolve physics lag
+        self.sim.setObjectInt32Param(self.tip, self.sim.shapeintparam_static, 1)
         
         # --- CRITICAL: Initialize these attributes ---
         self.state, self.timer = "HOME", 0  # Logic State

@@ -12,11 +12,15 @@ from PyQt6.QtGui import QImage, QPixmap, QFont
 import config
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 from vision import get_camera_state
-from ml_inference import load_ai_model, ask_ai
 from actuators import set_conveyor_speed
 from station_manager import Station
 from spawner import Spawner
 from gui_state import GUIState
+
+# --- NEW IMPORTS ---
+from ml_inference import load_ai_model, ask_ai
+from classic_vision import ask_classic
+from stats_logger import StatsLogger
 
 # =========================================================
 # SIMULATION THREAD: Handles ZMQ Communication
@@ -29,14 +33,15 @@ class SimWorker(QThread):
     def __init__(self, state):
         super().__init__()
         self.state = state
+        self.logger = StatsLogger() # <-- Initialize CSV Logger
 
     def run(self):
         self.log_ready.emit("System: Initializing ZMQ Client...")
         client = RemoteAPIClient()
         sim = client.require('sim')
-        client.setStepping(True) # Synchronous mode for reliable logic
+        client.setStepping(True) 
 
-        # Setup Hardware (Passing self.state for live tuning)
+        # Setup Hardware
         st2 = Station(sim, self.state, **config.STATIONS["ST2"])
         st1 = Station(sim, self.state, **config.STATIONS["ST1"], next_queue=st2.in_queue)
         stations = [st1, st2]
@@ -52,7 +57,6 @@ class SimWorker(QThread):
         shutter_last = False
 
         while self.state.app_open:
-            # 1. Simulation Start/Stop Management
             curr_state = sim.getSimulationState()
             if self.state.sim_active and curr_state == sim.simulation_stopped:
                 sim.startSimulation()
@@ -62,27 +66,44 @@ class SimWorker(QThread):
                 self.log_ready.emit("System: Simulation Stopped.")
 
             if curr_state == sim.simulation_stopped:
-                time.sleep(0.1) # Idle CPU while simulation is off
+                time.sleep(0.1) 
                 continue
 
-            # 2. RUNNING LOOP
             frame_start = time.perf_counter()
             now = sim.getSimulationTime()
 
-            # AI Shutter Logic
+            # --- AI / CLASSIC SHUTTER LOGIC ---
             res_s = sim.readProximitySensor(shutter_sensor)
             if res_s[0] > 0 and not shutter_last:
                 img, _ = get_camera_state(sim, master_cam)
                 if img is not None:
                     self.vision_ready.emit(img)
-                    pred, conf = ask_ai(img, rf_model)
+                    
+                    inference_start = time.perf_counter()
+                    
+                    # Route based on GUI Toggle
+                    if self.state.use_ml_mode:
+                        pred, conf = ask_ai(img, rf_model)
+                        mode_str = "ML"
+                    else:
+                        pred, conf = ask_classic(img)
+                        mode_str = "CLASSIC"
+                        
+                    inference_ms = (time.perf_counter() - inference_start) * 1000
+                    
                     self.state.last_prediction = pred
                     self.state.last_confidence = conf
-                    self.log_ready.emit(f"Vision: Detected {pred.upper()} ({conf:.1f}%)")
+                    self.state.inference_latency_ms = inference_ms
+                    
+                    self.log_ready.emit(f"Vision [{mode_str}]: Detected {pred.upper()} ({conf:.1f}%) in {inference_ms:.1f}ms")
+                    
+                    # Log to CSV
+                    self.logger.log_event(pred, inference_ms, mode_str)
+                    
                     st1.in_queue.append(pred)
             shutter_last = (res_s[0] > 0)
 
-            # Logistics & Speed Control (GUI Influenced)
+            # Logistics & Speed Control
             force_stop = False
             for st in stations:
                 if st.update(now): force_stop = True
@@ -92,7 +113,7 @@ class SimWorker(QThread):
                 set_conveyor_speed(sim, main_belts, target_speed)
                 last_speed_sent = target_speed
 
-            # Spawner (Manual and Auto Logic + Dynamic Spacing)
+            # Spawner
             log_msg = item_spawner.update(now, target_speed, 
                                           self.state.auto_spawn_enabled, 
                                           self.state.spawn_request_queue,
@@ -123,25 +144,21 @@ class FactoryControlPanel(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Tabs Setup
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
-        # Initialize All Tabs
         self.init_dashboard()
         self.init_spawner_tab()
         self.init_vision()
         self.init_advanced_tab()
         self.init_pallet_tab()
 
-        # Scrolling Log Box (Always Visible)
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setStyleSheet("background-color: #0b0b0b; color: #00FF41; font-family: monospace;")
         self.log_output.setMaximumHeight(200)
         main_layout.addWidget(self.log_output)
 
-        # Start Simulation Thread
         self.worker = SimWorker(self.state)
         self.worker.vision_ready.connect(self.update_camera_frame)
         self.worker.stats_ready.connect(self.update_telemetry)
@@ -152,7 +169,6 @@ class FactoryControlPanel(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Start/Stop Logic
         btn_layout = QHBoxLayout()
         self.btn_start = QPushButton("START SIMULATION")
         self.btn_start.setStyleSheet("background-color: #2e7d32; color: white; padding: 15px; font-weight: bold;")
@@ -166,14 +182,12 @@ class FactoryControlPanel(QMainWindow):
         btn_layout.addWidget(self.btn_stop)
         layout.addLayout(btn_layout)
 
-        # Telemetry Labels
         self.lbl_time = QLabel("Sim Time: 0.00s")
         self.lbl_latency = QLabel("ZMQ Round-Trip: 0.00ms")
         self.lbl_time.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         layout.addWidget(self.lbl_time)
         layout.addWidget(self.lbl_latency)
 
-        # Global Speed Slider
         layout.addWidget(QLabel("\nGlobal Main Belt Speed Control:"))
         self.add_generic_slider(layout, "Main Speed", 0, 20, 
                                int(self.state.main_speed * 100), 
@@ -186,13 +200,12 @@ class FactoryControlPanel(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Spacing Slider
         layout.addWidget(QLabel("--- Spacing Control ---"))
         self.lbl_spacing = QLabel(f"Object Spacing: {self.state.spawn_spacing:.2f}m")
         layout.addWidget(self.lbl_spacing)
         
         sld_spacing = QSlider(Qt.Orientation.Horizontal)
-        sld_spacing.setRange(20, 200) # 0.2m to 2.0m
+        sld_spacing.setRange(20, 200)
         sld_spacing.setValue(int(self.state.spawn_spacing * 100))
         sld_spacing.valueChanged.connect(self.on_spacing_slide)
         layout.addWidget(sld_spacing)
@@ -217,6 +230,15 @@ class FactoryControlPanel(QMainWindow):
     def init_vision(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        
+        # --- NEW TOGGLE BUTTON ---
+        self.btn_toggle_ml = QPushButton("MODE: MACHINE LEARNING ACTIVE")
+        self.btn_toggle_ml.setStyleSheet("background-color: #4a148c; color: white; padding: 15px; font-weight: bold; font-size: 14px;")
+        self.btn_toggle_ml.clicked.connect(self.toggle_vision_mode)
+        layout.addWidget(self.btn_toggle_ml)
+        
+        layout.addSpacing(10)
+        
         self.cam_display = QLabel("Camera Feed Offline")
         self.cam_display.setFixedSize(512, 512)
         self.cam_display.setStyleSheet("background-color: black; border: 2px solid #555;")
@@ -234,14 +256,12 @@ class FactoryControlPanel(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Pusher Settings
         layout.addWidget(QLabel("--- Pusher Timing (Seconds) ---"))
         self.add_generic_slider(layout, "Push Duration", 5, 50, int(self.state.push_duration * 10), 
                                 lambda v: setattr(self.state, 'push_duration', v/10.0))
         self.add_generic_slider(layout, "Laser Cooldown", 1, 50, int(self.state.laser_cooldown * 10), 
                                 lambda v: setattr(self.state, 'laser_cooldown', v/10.0))
 
-        # Robot Geometry
         layout.addWidget(QLabel("\n--- Robot Geometry (Meters) ---"))
         self.add_generic_slider(layout, "Drop Height", 10, 60, int(self.state.robot_drop_height * 100), 
                                 lambda v: setattr(self.state, 'robot_drop_height', v/100.0))
@@ -250,7 +270,6 @@ class FactoryControlPanel(QMainWindow):
         self.add_generic_slider(layout, "Arm Reach", -80, -30, int(self.state.robot_reach * 100), 
                                 lambda v: setattr(self.state, 'robot_reach', v/100.0))
 
-        # Basket Angles
         layout.addWidget(QLabel("\n--- Basket Placement (Degrees) ---"))
         self.add_generic_slider(layout, "Cube Angle", 0, 360, self.state.robot_base_deg_cube, 
                                 lambda v: setattr(self.state, 'robot_base_deg_cube', v))
@@ -279,7 +298,6 @@ class FactoryControlPanel(QMainWindow):
         layout.addStretch()
         self.tabs.addTab(tab, "Palletizing")
 
-    # Helper for adding sliders quickly
     def add_generic_slider(self, layout, label, min_v, max_v, curr_v, callback):
         lbl = QLabel(f"{label}: {curr_v}")
         layout.addWidget(lbl)
@@ -289,18 +307,32 @@ class FactoryControlPanel(QMainWindow):
         sld.valueChanged.connect(lambda v: [callback(v), lbl.setText(f"{label}: {v}")])
         layout.addWidget(sld)
 
-    # UI Handlers
     def start_sim(self): self.state.sim_active = True
     def stop_sim(self): self.state.sim_active = False
+    
     def toggle_auto(self):
         self.state.auto_spawn_enabled = self.auto_toggle.isChecked()
         self.auto_toggle.setStyleSheet(f"background-color: {'#1565c0' if self.state.auto_spawn_enabled else '#333'}; color: white; padding: 15px;")
+        
     def on_spacing_slide(self, val):
         self.state.spawn_spacing = val / 100.0
         self.lbl_spacing.setText(f"Object Spacing: {self.state.spawn_spacing:.2f}m")
+        
     def on_speed_slide(self, val): self.state.main_speed = val / 100.0
     def request_spawn(self, name): self.state.spawn_request_queue.append(name)
-    def reset_pallets(self): self.log_output.append("UI: Pallet reset requested (Not yet implemented in SimWorker)")
+    def reset_pallets(self): self.log_output.append("UI: Pallet reset requested")
+
+    # --- NEW TOGGLE HANDLER ---
+    def toggle_vision_mode(self):
+        self.state.use_ml_mode = not self.state.use_ml_mode
+        if self.state.use_ml_mode:
+            self.btn_toggle_ml.setText("MODE: MACHINE LEARNING ACTIVE")
+            self.btn_toggle_ml.setStyleSheet("background-color: #4a148c; color: white; padding: 15px; font-weight: bold; font-size: 14px;")
+            self.log_output.append("System: Switched to Random Forest Classifier.")
+        else:
+            self.btn_toggle_ml.setText("MODE: CLASSIC VISION ACTIVE")
+            self.btn_toggle_ml.setStyleSheet("background-color: #e65100; color: white; padding: 15px; font-weight: bold; font-size: 14px;")
+            self.log_output.append("System: Switched to OpenCV Deterministic Logic.")
 
     def update_telemetry(self, data):
         self.lbl_time.setText(f"Sim Time: {data['time']}")

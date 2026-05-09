@@ -1,0 +1,9 @@
+Timestamp,Total Objects Sorted,Session Time (s),Current Inference (ms),Avg Inference (ms),Prediction,Mode
+05:29:38,1,53.50,7.85,7.85,blue_cube,CLASSIC
+05:29:46,2,60.98,1.35,4.60,blue_cube,CLASSIC
+05:29:53,3,68.22,1.22,3.48,red_cube,CLASSIC
+05:30:01,4,76.11,1.50,2.98,red_cube,CLASSIC
+05:30:09,5,84.71,1.49,2.69,red_cube,CLASSIC
+05:30:21,6,96.03,1.64,2.51,red_cylinder,CLASSIC
+05:30:32,7,107.06,1.34,2.34,blue_cylinder,CLASSIC
+05:30:42,8,117.32,1.30,2.21,blue_cylinder,CLASSIC

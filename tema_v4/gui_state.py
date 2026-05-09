@@ -22,6 +22,9 @@ class GUIState:
         self.pallet_spacing = 0.10  # 10cm default
         self.pallet_grid_size = 3
         
+        # --- Vision Mode Selection (NEW) ---
+        self.use_ml_mode = True  # True = Machine Learning, False = Classic OpenCV Way
+        
         # Spawner & Telemetry
         self.auto_spawn_enabled = False
         self.spawn_request_queue = [] 
@@ -30,3 +33,7 @@ class GUIState:
         self.last_confidence = 0.0
         self.sim_time = 0.0
         self.loop_latency = 0.0
+        
+        # --- CSV Logging Telemetry (NEW) ---
+        self.total_objects_sorted = 0
+        self.inference_latency_ms = 0.0
