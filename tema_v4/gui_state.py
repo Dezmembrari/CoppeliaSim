@@ -37,3 +37,7 @@ class GUIState:
         # --- CSV Logging Telemetry (NEW) ---
         self.total_objects_sorted = 0
         self.inference_latency_ms = 0.0
+
+        # Image fingerprint
+        self.last_features = [0.0, 0.0, 0.0, 0.0] # [Hue, Sat, Circularity, Extent]
+        self.model_accuracy = 98.5 # Static or pulled from a log

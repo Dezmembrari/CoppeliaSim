@@ -2,6 +2,7 @@ import sys
 import time
 import cv2
 import numpy as np
+import subprocess
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, 
                              QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
                              QPushButton, QTextEdit, QFrame)
@@ -11,7 +12,7 @@ from PyQt6.QtGui import QImage, QPixmap, QFont
 # Project Imports
 import config
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
-from vision import get_camera_state
+from vision import get_camera_state, get_fingerprint
 from actuators import set_conveyor_speed
 from station_manager import Station
 from spawner import Spawner
@@ -59,6 +60,8 @@ class SimWorker(QThread):
         while self.state.app_open:
             curr_state = sim.getSimulationState()
             if self.state.sim_active and curr_state == sim.simulation_stopped:
+                # Reload model on start just in case it was retrained while stopped
+                rf_model = load_ai_model()
                 sim.startSimulation()
                 self.log_ready.emit("System: Simulation Started.")
             elif not self.state.sim_active and curr_state != sim.simulation_stopped:
@@ -82,7 +85,11 @@ class SimWorker(QThread):
                     inference_start = time.perf_counter()
                     
                     # Route based on GUI Toggle
-                    if self.state.use_ml_mode:
+                    if getattr(self.state, 'use_ml_mode', True):
+                        # Extract features for live GUI display
+                        features = get_fingerprint(img)
+                        self.state.last_features = features.tolist()
+                        
                         pred, conf = ask_ai(img, rf_model)
                         mode_str = "ML"
                     else:
@@ -152,6 +159,7 @@ class FactoryControlPanel(QMainWindow):
         self.init_vision()
         self.init_advanced_tab()
         self.init_pallet_tab()
+        self.init_ml_details() # <-- New Tab Initialization
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
@@ -298,6 +306,103 @@ class FactoryControlPanel(QMainWindow):
         layout.addStretch()
         self.tabs.addTab(tab, "Palletizing")
 
+    def init_ml_details(self):
+        """Initializes the ML Architecture information tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        header = QLabel("Hybrid Computer Vision Architecture")
+        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #bb86fc;")
+        layout.addWidget(header)
+
+        # Summary Section
+        summary = QTextEdit()
+        summary.setReadOnly(True)
+        summary.setHtml("""
+            <p><b>Phase 1: Feature Extraction (OpenCV)</b><br>
+            Instead of raw pixels, we calculate a 4D fingerprint for every object: Hue, Saturation, Circularity, and Extent. 
+            This makes the system rotation-proof and invariant to lighting changes.</p>
+            <p><b>Phase 2: Classification (Random Forest)</b><br>
+            A forest of 100 decision trees analyzes the fingerprint. It finds the optimal decision boundaries 
+            to distinguish between shapes that 'look' similar to simple math (like cubes vs cylinders).</p>
+        """)
+        summary.setMaximumHeight(130)
+        layout.addWidget(summary)
+
+        # Live Fingerprint Section & Reused Camera Feed
+        monitor_layout = QHBoxLayout()
+        
+        self.ml_cam_display = QLabel("Camera Feed Offline")
+        self.ml_cam_display.setFixedSize(256, 256)
+        self.ml_cam_display.setStyleSheet("background-color: black; border: 2px solid #555;")
+        self.ml_cam_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        monitor_layout.addWidget(self.ml_cam_display)
+
+        fingerprint_layout = QVBoxLayout()
+        fingerprint_layout.addWidget(QLabel("Live Input Vector (The Fingerprint):"))
+        self.ml_labels = []
+        names = ["Mean Hue", "Mean Saturation", "Circularity (0-1)", "Extent (Fill Ratio)"]
+        for name in names:
+            lbl = QLabel(f"{name}: 0.0000")
+            lbl.setStyleSheet("font-family: monospace; background-color: #1e1e1e; padding: 5px;")
+            self.ml_labels.append(lbl)
+            fingerprint_layout.addWidget(lbl)
+        fingerprint_layout.addStretch()
+        
+        monitor_layout.addLayout(fingerprint_layout)
+        layout.addLayout(monitor_layout)
+
+        # Model Metadata
+        meta_frame = QFrame()
+        meta_frame.setStyleSheet("background-color: #333; border-radius: 5px; padding: 10px;")
+        meta_layout = QVBoxLayout(meta_frame)
+        meta_layout.addWidget(QLabel("Model: Random Forest (Scikit-Learn) | Estimators: 100 Trees"))
+        layout.addWidget(meta_frame)
+
+        self.btn_retrain = QPushButton("RETRAIN MODEL FROM DATASET")
+        self.btn_retrain.setStyleSheet("background-color: #004d40; color: white; padding: 10px; font-weight: bold;")
+        self.btn_retrain.clicked.connect(self.trigger_retrain)
+        layout.addWidget(self.btn_retrain)
+
+        # --- NEW TRAINING OUTPUT BOX ---
+        self.training_output_box = QTextEdit()
+        self.training_output_box.setReadOnly(True)
+        self.training_output_box.setStyleSheet("background-color: #121212; color: #ffeb3b; font-family: monospace;")
+        self.training_output_box.setPlaceholderText("Training output (Accuracy, Classification Report) will appear here after retraining...")
+        self.training_output_box.setMaximumHeight(200)
+        layout.addWidget(self.training_output_box)
+
+        layout.addStretch()
+        self.tabs.addTab(tab, "ML Architecture")
+
+    def trigger_retrain(self):
+        """Safely executes the train_model.py script and captures the output."""
+        if self.state.sim_active:
+            self.log_output.append("System: ERROR - Cannot retrain model while factory is running. Please STOP the simulation first to prevent file conflicts.")
+            return
+
+        self.log_output.append("\nSystem: Initiating ML retraining sequence...")
+        self.btn_retrain.setText("TRAINING IN PROGRESS...")
+        self.btn_retrain.setEnabled(False)
+        QApplication.processEvents() # Force UI to update text before blocking
+
+        try:
+            # Run the script and capture the stdout/stderr
+            result = subprocess.run([sys.executable, "ML/train_model.py"], capture_output=True, text=True)
+            
+            if result.stdout:
+                # Add terminal output to the dedicated ML training box
+                self.training_output_box.setText(result.stdout.strip())
+                self.log_output.append("System: Training complete. Check ML Architecture tab for metrics.")
+            if result.stderr:
+                self.log_output.append(f"Error: {result.stderr.strip()}")
+                
+        except Exception as e:
+            self.log_output.append(f"System: Retraining failed! {e}")
+        finally:
+            self.btn_retrain.setText("RETRAIN MODEL FROM DATASET")
+            self.btn_retrain.setEnabled(True)
+
     def add_generic_slider(self, layout, label, min_v, max_v, curr_v, callback):
         lbl = QLabel(f"{label}: {curr_v}")
         layout.addWidget(lbl)
@@ -324,26 +429,52 @@ class FactoryControlPanel(QMainWindow):
 
     # --- NEW TOGGLE HANDLER ---
     def toggle_vision_mode(self):
+        # Default to True if not yet defined
+        self.state.use_ml_mode = getattr(self.state, 'use_ml_mode', True)
         self.state.use_ml_mode = not self.state.use_ml_mode
+        
         if self.state.use_ml_mode:
             self.btn_toggle_ml.setText("MODE: MACHINE LEARNING ACTIVE")
             self.btn_toggle_ml.setStyleSheet("background-color: #4a148c; color: white; padding: 15px; font-weight: bold; font-size: 14px;")
             self.log_output.append("System: Switched to Random Forest Classifier.")
+            
+            # Immediately update the label text prefix
+            if hasattr(self.state, 'last_prediction'):
+                self.lbl_ai_res.setText(f"Last AI Result: {self.state.last_prediction}")
         else:
             self.btn_toggle_ml.setText("MODE: CLASSIC VISION ACTIVE")
             self.btn_toggle_ml.setStyleSheet("background-color: #e65100; color: white; padding: 15px; font-weight: bold; font-size: 14px;")
             self.log_output.append("System: Switched to OpenCV Deterministic Logic.")
+            
+            # Immediately update the label text prefix
+            if hasattr(self.state, 'last_prediction'):
+                self.lbl_ai_res.setText(f"Last Sensor Result: {self.state.last_prediction}")
 
     def update_telemetry(self, data):
         self.lbl_time.setText(f"Sim Time: {data['time']}")
         self.lbl_latency.setText(f"ZMQ Round-Trip: {data['latency']}")
-        self.lbl_ai_res.setText(f"Last AI Result: {data['pred']}")
+        
+        # Dynamic prefix based on the active mode
+        prefix = "Last AI Result" if getattr(self.state, 'use_ml_mode', True) else "Last Sensor Result"
+        self.lbl_ai_res.setText(f"{prefix}: {data['pred']}")
+        
+        # Update Live ML Fingerprint labels if features exist
+        if hasattr(self.state, 'last_features') and self.state.last_features:
+            for i, val in enumerate(self.state.last_features):
+                feature_prefix = self.ml_labels[i].text().split(":")[0]
+                self.ml_labels[i].setText(f"{feature_prefix}: {val:.4f}")
 
     def update_camera_frame(self, cv_img):
         rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_img.shape
         qt_img = QImage(rgb_img.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        
+        # Update main Vision tab
         self.cam_display.setPixmap(QPixmap.fromImage(qt_img).scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio))
+        
+        # Update ML Architecture tab camera
+        if hasattr(self, 'ml_cam_display'):
+            self.ml_cam_display.setPixmap(QPixmap.fromImage(qt_img).scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio))
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
